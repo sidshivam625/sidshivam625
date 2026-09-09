@@ -15,7 +15,7 @@
 - 🧠 &nbsp;**AI Researcher** at Mars Rover Manipal, working on vision and language models
 - 🎓 &nbsp;**B.Tech Information Technology** at Manipal Institute of Technology
 - 🗂 &nbsp;**Membership Chairperson** at the ACM Manipal Student Chapter
-- 🕹 &nbsp;I made a tiny game called **Gradient Descent**. It is about local minima, which is also what most of my week is about.
+
 
 <div align="center">
 
@@ -128,32 +128,7 @@ A Chrome extension that lets an agent finish the boring half of the internet.
 
 </details>
 
-<details>
-<summary><b>Gradient Descent</b> &nbsp;the game above &nbsp;<code>expand</code></summary>
 
-<br>
-
-A pixel game about the thing that ruins training runs. A ball rolls down a loss landscape
-and will happily settle in the first valley it finds. Your steering is capped, so it cannot
-climb a real ridge. Escaping costs momentum, and momentum is limited.
-
-Three landscapes, no engine, no dependencies. Plain canvas and about four hundred lines.
-Every level was tuned against a physics simulation to guarantee three things: doing nothing
-always ends trapped, level one is solvable by steering alone, and levels two and three
-cannot be solved without spending momentum.
-
-</details>
-
-<details>
-<summary><b>Open source</b> &nbsp;30+ commits to <code>coral/coral</code> &nbsp;<code>expand</code></summary>
-
-<br>
-
-Two merged pull requests, [#1058](https://github.com/withcoral/coral/pull/1058) and
-[#1066](https://github.com/withcoral/coral/pull/1066), adding Chromium and Firefox source
-support and improving compatibility across non WebKit engines.
-
-</details>
 
 ---
 
@@ -172,11 +147,6 @@ at Tech Tatva, running live leaderboard tracking for 200+ participants.
 <div align="center">
 
 <br>
-
-<img src="https://github-readme-stats.vercel.app/api?username=sidshivam625&show_icons=true&hide_border=true&bg_color=0D1117&title_color=58A6FF&text_color=C9D1D9&icon_color=58A6FF&hide_title=true" height="140"/>
-<img src="https://github-readme-stats.vercel.app/api/top-langs/?username=sidshivam625&layout=compact&hide_border=true&bg_color=0D1117&title_color=58A6FF&text_color=C9D1D9&langs_count=6" height="140"/>
-
-<br><br>
 
 *"the model is not the product. the loop around it is."*
 
