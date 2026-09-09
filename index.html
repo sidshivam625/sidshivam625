@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Gradient Descent</title>
+<meta name="description" content="A tiny pixel game about escaping local minima. Built by Siddhant Shivam.">
+<style>
+  :root{ --ink:#e8eeff; --dim:#6f7fa6; --gold:#ffd60a; }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:#05070f;color:var(--ink);
+    font-family:ui-monospace,"Cascadia Mono",Consolas,monospace;overflow:hidden}
+  #wrap{position:fixed;inset:0;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;gap:10px;padding:10px}
+  canvas{image-rendering:pixelated;image-rendering:crisp-edges;
+    border:2px solid #1b2440;border-radius:4px;box-shadow:0 0 0 1px #000,0 18px 60px rgba(0,0,0,.7);
+    width:min(96vw, 1040px); height:auto; max-height:80vh; touch-action:none}
+  #keys{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
+  .k{background:#111a2e;border:1px solid #263352;color:var(--dim);border-radius:5px;
+    padding:7px 13px;font-size:12px;letter-spacing:.08em;user-select:none;-webkit-user-select:none}
+  .k b{color:var(--ink)}
+  .k:active{background:#1b2740;color:var(--ink)}
+  #hint{color:var(--dim);font-size:11.5px;letter-spacing:.1em;text-align:center}
+  a{color:var(--gold)}
+  @media (pointer:coarse){ #hint{display:none} }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="c" width="480" height="270"></canvas>
+  <div id="keys">
+    <div class="k" id="bl"><b>&#9664;</b> PUSH</div>
+    <div class="k" id="bb"><b>SPACE</b> MOMENTUM</div>
+    <div class="k" id="br">PUSH <b>&#9654;</b></div>
+    <div class="k" id="brs"><b>R</b> RESTART</div>
+  </div>
+  <div id="hint">arrow keys to push &nbsp;·&nbsp; space for a momentum kick &nbsp;·&nbsp; settle in the flagged minimum</div>
+</div>
+
+<script>
+"use strict";
+
+/* ---------------------------------------------------------------- 5x7 font */
+const G = {
+ A:" ## /#  #/#  #/####/#  #/#  #/#  #", B:"### /#  #/#  #/### /#  #/#  #/### ",
+ C:" ###/#   /#   /#   /#   /#   / ###", D:"### /#  #/#  #/#  #/#  #/#  #/### ",
+ E:"####/#   /#   /### /#   /#   /####", F:"####/#   /#   /### /#   /#   /#   ",
+ G:" ###/#   /#   /# ##/#  #/#  #/ ###", H:"#  #/#  #/#  #/####/#  #/#  #/#  #",
+ I:"###/ # / # / # / # / # /###",      J:"  ##/   #/   #/   #/#  #/#  #/ ## ",
+ K:"#  #/# # /##  /##  /# # /#  #/#  #", L:"#   /#   /#   /#   /#   /#   /####",
+ M:"#   #/## ##/# # #/# # #/#   #/#   #/#   #", N:"#  #/## #/## #/# ##/# ##/#  #/#  #",
+ O:" ## /#  #/#  #/#  #/#  #/#  #/ ## ", P:"### /#  #/#  #/### /#   /#   /#   ",
+ Q:" ## /#  #/#  #/#  #/# ##/#  #/ ###", R:"### /#  #/#  #/### /# # /#  #/#  #",
+ S:" ###/#   /#   / ## /   #/   #/### ", T:"#####/  #  /  #  /  #  /  #  /  #  /  #  ",
+ U:"#  #/#  #/#  #/#  #/#  #/#  #/ ## ", V:"#   #/#   #/#   #/#   #/ # # / # # /  #  ",
+ W:"#   #/#   #/#   #/# # #/# # #/## ##/#   #", X:"#  #/#  #/ ## / ## / ## /#  #/#  #",
+ Y:"#   #/#   #/ # # /  #  /  #  /  #  /  #  ", Z:"####/   #/  # / #  /#   /#   /####",
+ "0":" ## /#  #/# ##/#  #/## #/#  #/ ## ", "1":" # /## / # / # / # / # /###",
+ "2":" ## /#  #/   #/  # / #  /#   /####", "3":"### /   #/   #/ ## /   #/   #/### ",
+ "4":"#  #/#  #/#  #/####/   #/   #/   #", "5":"####/#   /### /   #/   #/#  #/ ## ",
+ "6":" ## /#   /#   /### /#  #/#  #/ ## ", "7":"####/   #/  # /  # / #  / #  / #  ",
+ "8":" ## /#  #/#  #/ ## /#  #/#  #/ ## ", "9":" ## /#  #/#  #/ ###/   #/   #/ ## ",
+ " ":"   /   /   /   /   /   /   ", ".":"  /  /  /  /  /  / #", ":":"  / # / # /  /  / # / # ",
+ "-":"    /    /    /####/    /    /    ", "!":" # / # / # / # / # /   / # ",
+ "%":"#  #/#  #/   #/  # / #  /#  #/#  #", "/":"   #/   #/  # / #  / #  /#   /#   ",
+ "+":"    /  # /  # /####/  # /  # /    ", "?":" ## /#  #/   #/  # / #  /    / #  ",
+ "'":" # / # /   /   /   /   /   "
+};
+function glyph(ch){ return (G[ch] || G["?"]).split("/"); }
+function textW(s, sc){ let w=0; for(const ch of s.toUpperCase()) w += (glyph(ch)[0].length+1)*sc; return w-sc; }
+function text(x, y, s, col, sc){
+  sc = sc||1; g.fillStyle = col; let cx = x|0;
+  for(const ch of s.toUpperCase()){
+    const rows = glyph(ch);
+    for(let r=0;r<rows.length;r++)
+      for(let c=0;c<rows[r].length;c++)
+        if(rows[r][c] === "#") g.fillRect(cx+c*sc, (y|0)+r*sc, sc, sc);
+    cx += (rows[0].length+1)*sc;
+  }
+}
+function textC(y, s, col, sc){ text((W-textW(s,sc))/2, y, s, col, sc); }
+
+/* ------------------------------------------------------------------ setup */
+const cv = document.getElementById("c");
+const g  = cv.getContext("2d");
+const W = cv.width, H = cv.height;
+const TOP = 92, SPAN = 132;          // terrain vertical band
+
+/* ------------------------------------------------------------------ levels */
+function gauss(x,mu,s2,amp){ return amp*Math.exp(-((x-mu)*(x-mu))/s2); }
+
+/* Landscapes are tuned against a physics simulation so that, for every level:
+     - doing nothing always ends trapped in a local minimum
+     - level 1 is escapable by pushing alone
+     - levels 2 and 3 exceed the push cap and REQUIRE momentum kicks
+   The flag is placed at the true argmin, computed at load time.            */
+const LEVELS = [
+  { name:"WARM UP", epochs:34, spawn:0.10, boosts:3, lr:[0.50],
+    f:x => 0.66 - 0.10*x - gauss(x,0.34,0.010,0.07) - gauss(x,0.84,0.011,0.46) },
+
+  { name:"SADDLE", epochs:44, spawn:0.08, boosts:4, lr:[0.34,0.62],
+    f:x => 0.70 - gauss(x,0.28,0.0080,0.22) - gauss(x,0.55,0.0080,0.20)
+                - gauss(x,0.86,0.0090,0.52) },
+
+  { name:"OVERFIT", epochs:56, spawn:0.04, boosts:5, lr:[0.30,0.52,0.75],
+    f:x => 0.72 - gauss(x,0.18,0.0060,0.24) - gauss(x,0.40,0.0060,0.26)
+                - gauss(x,0.63,0.0060,0.24) - gauss(x,0.90,0.0080,0.56) }
+];
+
+const GR = 2.6, FRIC = 0.90, PUSH = 0.85, VMAX = 0.52, KICK = 0.80;
+const SETTLE_T = 0.60, WIN_X = 0.035, WIN_V = 0.30;
+
+let L, lvl = 0, ball, stars = [], parts = [], state = "title", t0 = 0;
+
+function elev(x){ return Math.max(0, Math.min(1, L.f(Math.max(0,Math.min(1,x)))) ); }
+function slope(x){ const h = 0.0016; return (elev(x+h) - elev(x-h)) / (2*h); }
+function sy(x){ return TOP + (1 - elev(x))*SPAN; }
+
+function loadLevel(i){
+  lvl = i; L = LEVELS[i];
+  // the flag always marks the TRUE global minimum, never a hand-typed guess
+  let best = 0, bv = Infinity;
+  for(let k = 0; k <= 2000; k++){
+    const e = L.f(k/2000);
+    if(e < bv){ bv = e; best = k/2000; }
+  }
+  L.goal = best;
+  ball = { x:L.spawn, v:0, settle:0, boosts:L.boosts, epochs:L.epochs };
+  L.tokens = L.lr.map(x => ({x:x, got:false}));
+  parts = [];
+  state = "play";
+}
+function reset(){ loadLevel(lvl); }
+
+for(let i=0;i<70;i++) stars.push({x:Math.random()*W, y:Math.random()*TOP*0.9,
+  v:[40,70,110][(Math.random()*3)|0]});
+
+/* ------------------------------------------------------------------ input */
+const key = {};
+addEventListener("keydown", e => {
+  if(["ArrowLeft","ArrowRight","Space","KeyA","KeyD"].includes(e.code)) e.preventDefault();
+  key[e.code] = true;
+  if(e.code === "KeyR") reset();
+  if(e.code === "Space"){
+    if(state === "title"){ loadLevel(0); }
+    else if(state === "dead"){ reset(); }
+    else if(state === "won"){ if(lvl+1 < LEVELS.length) loadLevel(lvl+1); else state = "final"; }
+    else if(state === "play") kick();
+  }
+});
+addEventListener("keyup", e => { key[e.code] = false; });
+
+function kick(){
+  if(ball.boosts <= 0) return;
+  ball.boosts--;
+  const dir = Math.abs(ball.v) > 0.004 ? Math.sign(ball.v) : 1;
+  ball.v += dir*KICK;
+  for(let i=0;i<14;i++) parts.push({x:ball.x, y:sy(ball.x)-4,
+    vx:(Math.random()-0.5)*70, vy:-Math.random()*55, l:0.5, c:"#ffd60a"});
+}
+function hold(id, code){
+  const el = document.getElementById(id);
+  const on  = e => { e.preventDefault(); key[code] = true;
+                     if(code === "Space"){ el.blur(); simulateSpace(); } };
+  const off = e => { e.preventDefault(); key[code] = false; };
+  el.addEventListener("pointerdown", on); el.addEventListener("pointerup", off);
+  el.addEventListener("pointerleave", off); el.addEventListener("pointercancel", off);
+}
+function simulateSpace(){
+  if(state === "title") loadLevel(0);
+  else if(state === "dead") reset();
+  else if(state === "won"){ if(lvl+1 < LEVELS.length) loadLevel(lvl+1); else state = "final"; }
+  else if(state === "play") kick();
+}
+hold("bl","ArrowLeft"); hold("br","ArrowRight"); hold("bb","Space");
+document.getElementById("brs").addEventListener("pointerdown", e => { e.preventDefault(); reset(); });
+cv.addEventListener("pointerdown", e => { if(state !== "play") simulateSpace(); });
+
+/* ------------------------------------------------------------------ update */
+function update(dt){
+  if(state !== "play") return;
+
+  // pushing is capped: past VMAX your own steering adds nothing.
+  // only a momentum kick can carry you over a real ridge.
+  if(Math.abs(ball.v) < VMAX){
+    if(key.ArrowLeft  || key.KeyA) ball.v -= PUSH*dt;
+    if(key.ArrowRight || key.KeyD) ball.v += PUSH*dt;
+  }
+
+  const s = Math.max(-6, Math.min(6, slope(ball.x)));
+  ball.v += (-GR * s) * dt;
+  ball.v *= Math.max(0, 1 - FRIC*dt);
+  ball.x += ball.v * dt;
+
+  if(ball.x < 0.005){ ball.x = 0.005; ball.v = Math.abs(ball.v)*0.45; }
+  if(ball.x > 0.995){ ball.x = 0.995; ball.v = -Math.abs(ball.v)*0.45; }
+
+  for(const tk of L.tokens)
+    if(!tk.got && Math.abs(tk.x - ball.x) < 0.022){
+      tk.got = true; ball.boosts++;
+      for(let i=0;i<18;i++) parts.push({x:tk.x, y:sy(tk.x)-10,
+        vx:(Math.random()-0.5)*90, vy:-Math.random()*70, l:0.6, c:"#63e6ff"});
+    }
+
+  ball.epochs -= dt;
+  if(ball.epochs <= 0){ ball.epochs = 0; state = "dead"; }
+
+  if(Math.abs(ball.x - L.goal) < WIN_X && Math.abs(ball.v) < WIN_V){
+    ball.settle += dt;
+    if(ball.settle >= SETTLE_T){
+      state = (lvl + 1 < LEVELS.length) ? "won" : "final";
+      for(let i=0;i<40;i++) parts.push({x:L.goal, y:sy(L.goal)-6,
+        vx:(Math.random()-0.5)*130, vy:-Math.random()*110, l:1.1, c:"#4ade80"});
+    }
+  } else ball.settle = 0;
+
+  for(const p of parts){ p.x += (p.vx/W)*dt; p.y += p.vy*dt; p.vy += 190*dt; p.l -= dt; }
+  parts = parts.filter(p => p.l > 0);
+}
+
+/* ------------------------------------------------------------------- draw */
+function px(x){ return Math.round(x*W); }
+
+function drawScene(){
+  const grd = g.createLinearGradient(0,0,0,H);
+  grd.addColorStop(0,"#070b18"); grd.addColorStop(1,"#101828");
+  g.fillStyle = grd; g.fillRect(0,0,W,H);
+
+  for(const s of stars){ g.fillStyle = `rgb(${s.v},${s.v},${s.v*1.3|0})`; g.fillRect(s.x|0,s.y|0,1,1); }
+  g.fillStyle = "#141c33";
+  for(let x=0;x<W;x+=24) g.fillRect(x,0,1,H);
+  for(let y=0;y<H;y+=24) g.fillRect(0,y,W,1);
+
+  for(let i=0;i<W;i++){
+    const y = sy(i/(W-1))|0;
+    g.fillStyle = "#0d2c2a"; g.fillRect(i,y+5,1,H-y);
+    g.fillStyle = "#14563f"; g.fillRect(i,y+2,1,3);
+    g.fillStyle = "#34d67f"; g.fillRect(i,y,1,2);
+  }
+
+  // goal flag
+  const gx = px(L.goal), gy = sy(L.goal)|0;
+  g.fillStyle = "#e6ecf5"; g.fillRect(gx,gy-26,1,26);
+  g.fillStyle = "#ffc400";
+  g.beginPath(); g.moveTo(gx+2,gy-26); g.lineTo(gx+15,gy-21); g.lineTo(gx+2,gy-16); g.fill();
+  text(gx-12, gy-37, "MIN", "#ffd60a", 1);
+
+  // learning-rate tokens
+  for(const tk of L.tokens){
+    if(tk.got) continue;
+    const x = px(tk.x), y = sy(tk.x)-13 + Math.sin(performance.now()/260 + tk.x*9)*2;
+    g.fillStyle = "#0b3d4a"; g.fillRect(x-5,y-5,11,11);
+    g.fillStyle = "#63e6ff"; g.fillRect(x-4,y-4,9,9);
+    text(x-4, y-3, "LR", "#052029", 1);
+  }
+
+  for(const p of parts){
+    g.globalAlpha = Math.max(0, Math.min(1, p.l));
+    g.fillStyle = p.c; g.fillRect(px(p.x), p.y|0, 2, 2);
+  }
+  g.globalAlpha = 1;
+
+  // ball
+  const bx = px(ball.x), by = sy(ball.x) - 5;
+  g.fillStyle = "rgba(90,120,200,.16)"; g.beginPath(); g.arc(bx,by,10,0,7); g.fill();
+  g.fillStyle = "rgba(90,120,200,.30)"; g.beginPath(); g.arc(bx,by,7,0,7); g.fill();
+  g.fillStyle = "#ff8a24"; g.beginPath(); g.arc(bx,by,4.2,0,7); g.fill();
+  g.fillStyle = "#ffe4a0"; g.fillRect(bx-2,by-3,2,2);
+}
+
+function drawHUD(){
+  g.fillStyle = "rgba(5,8,16,.72)"; g.fillRect(0,0,W,20);
+  g.fillStyle = "#1b2440"; g.fillRect(0,20,W,1);
+
+  text(6, 7, "LVL " + (lvl+1) + "/" + LEVELS.length + "  " + L.name, "#8fa3cc", 1);
+
+  const loss = elev(ball.x);
+  text(150, 7, "LOSS " + loss.toFixed(3), loss < 0.25 ? "#4ade80" : "#8fa3cc", 1);
+
+  text(250, 7, "MOMENTUM " + ball.boosts, ball.boosts ? "#ffd60a" : "#4a5878", 1);
+
+  const frac = ball.epochs / L.epochs;
+  const col = frac < 0.25 ? "#ff5d5d" : "#63e6ff";
+  text(352, 7, "EPOCHS", "#8fa3cc", 1);
+  g.fillStyle = "#1b2440"; g.fillRect(404, 7, 70, 7);
+  g.fillStyle = col;       g.fillRect(404, 7, Math.max(0, 70*frac)|0, 7);
+
+  // speed vs push-cap: the bar greys out where your own steering stops helping
+  const sp = Math.min(1, Math.abs(ball.v)/1.4), cap = VMAX/1.4;
+  g.fillStyle = "#0b1224"; g.fillRect(6, H-11, 92, 5);
+  g.fillStyle = Math.abs(ball.v) > VMAX ? "#ffd60a" : "#3f7fd6";
+  g.fillRect(6, H-11, (92*sp)|0, 5);
+  g.fillStyle = "#7f8db0"; g.fillRect(6 + (92*cap|0), H-13, 1, 9);
+  text(6, H-21, Math.abs(ball.v) > VMAX ? "MOMENTUM" : "PUSH CAP",
+       Math.abs(ball.v) > VMAX ? "#ffd60a" : "#5f6f96", 1);
+
+  if(ball.settle > 0){
+    const w = (60 * (ball.settle/SETTLE_T))|0;
+    g.fillStyle = "#0f2a1d"; g.fillRect(W/2-30, H-16, 60, 5);
+    g.fillStyle = "#4ade80"; g.fillRect(W/2-30, H-16, w, 5);
+    text(W/2-34, H-27, "CONVERGING", "#4ade80", 1);
+  }
+}
+
+function panel(y,h){
+  g.fillStyle = "rgba(4,7,14,.88)"; g.fillRect(0,y,W,h);
+  g.fillStyle = "#1b2440"; g.fillRect(0,y,W,1); g.fillRect(0,y+h-1,W,1);
+}
+
+function drawTitle(){
+  drawScene();
+  panel(60,150);
+  textC(74, "GRADIENT DESCENT", "#eef4ff", 3);
+  textC(104, "ESCAPE THE LOCAL MINIMA", "#68c4ec", 1);
+  textC(124, "THE BALL ROLLS DOWNHILL ON ITS OWN AND WILL", "#8fa3cc", 1);
+  textC(136, "HAPPILY SETTLE IN THE WRONG VALLEY FOREVER.", "#8fa3cc", 1);
+  textC(154, "YOUR PUSH IS CAPPED. IT CANNOT CLIMB A REAL RIDGE.", "#ffd60a", 1);
+  textC(166, "SPEND MOMENTUM WHILE ALREADY MOVING TO BREAK OUT.", "#8fa3cc", 1);
+  textC(184, "ARROWS PUSH   SPACE KICKS   R RESTARTS", "#5f6f96", 1);
+  if(((performance.now()/520)|0) % 2 === 0) textC(200, "PRESS SPACE TO START", "#ffd60a", 2);
+}
+function drawDead(){
+  drawScene(); drawHUD(); panel(88,86);
+  textC(102, "OUT OF EPOCHS", "#ff6b6b", 3);
+  textC(132, "THE RUN ENDED IN A LOCAL MINIMUM.", "#8fa3cc", 1);
+  textC(150, "PRESS SPACE OR R TO TRY AGAIN", "#ffd60a", 1);
+}
+function drawWon(){
+  drawScene(); drawHUD(); panel(88,86);
+  textC(102, "CONVERGED", "#4ade80", 3);
+  textC(132, "GLOBAL MINIMUM REACHED IN " +
+        (L.epochs - ball.epochs).toFixed(1) + "S", "#8fa3cc", 1);
+  textC(150, "PRESS SPACE FOR THE NEXT LANDSCAPE", "#ffd60a", 1);
+}
+function drawFinal(){
+  drawScene(); panel(40,196);
+  textC(54,  "ALL LANDSCAPES CLEARED", "#4ade80", 2);
+  textC(80,  "YOU BEAT GRADIENT DESCENT.", "#eef4ff", 1);
+  textC(96,  "MOST RUNS STOP AT THE FIRST VALLEY THAT", "#8fa3cc", 1);
+  textC(108, "LOOKS GOOD ENOUGH. YOURS DID NOT.", "#8fa3cc", 1);
+  const on = ((performance.now()/560)|0) % 2 === 0;
+  g.fillStyle = on ? "#ffd60a" : "#d8b400";
+  const bw = textW("CLAIM YOUR REWARD",2)+22;
+  g.fillRect((W-bw)/2, 132, bw, 26);
+  g.fillStyle = "#584a00"; g.fillRect((W-bw)/2, 156, bw, 2);
+  text((W-textW("CLAIM YOUR REWARD",2))/2, 140, "CLAIM YOUR REWARD", "#1b1600", 2);
+  textC(172, "CLICK THE BUTTON ABOVE", "#8fa3cc", 1);
+  textC(190, "BUILT BY SIDDHANT SHIVAM", "#5f6f96", 1);
+  textC(206, "PRESS R TO PLAY AGAIN", "#5f6f96", 1);
+}
+
+/* ---- reward click ------------------------------------------------------- */
+/*  Reward unlocked by beating all three levels.                            */
+const REWARD_URL = "https://drive.google.com/drive/folders/1_LeRkvmisb16IW9PspkGbypYql3ZxsOR?usp=sharing";
+
+cv.addEventListener("click", e => {
+  if(state !== "final") return;
+  const r = cv.getBoundingClientRect();
+  const x = (e.clientX - r.left) * (W / r.width);
+  const y = (e.clientY - r.top)  * (H / r.height);
+  const bw = textW("CLAIM YOUR REWARD",2)+22;
+  if(x > (W-bw)/2 && x < (W+bw)/2 && y > 132 && y < 158) window.open(REWARD_URL, "_blank");
+});
+
+/* ------------------------------------------------------------------- loop */
+let last = performance.now();
+function frame(now){
+  let dt = (now - last)/1000; last = now;
+  if(dt > 0.05) dt = 0.05;
+  update(dt);
+  if(state === "title") drawTitle();
+  else if(state === "dead") drawDead();
+  else if(state === "won") drawWon();
+  else if(state === "final") drawFinal();
+  else { drawScene(); drawHUD(); }
+  // scanlines
+  g.fillStyle = "rgba(0,0,0,.12)";
+  for(let y=0;y<H;y+=3) g.fillRect(0,y,W,1);
+  requestAnimationFrame(frame);
+}
+loadLevel(0); state = "title";
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
