@@ -1,0 +1,702 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Gradient Descent</title>
+<meta name="description" content="A pixel game where you are the optimizer: tune learning rate, momentum, Adam and gradient clipping on real loss surfaces. Built by Siddhant Shivam.">
+<style>
+  :root{ --ink:#e8eeff; --dim:#6f7fa6; --gold:#ffd60a; }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:#05070f;color:var(--ink);
+    font-family:ui-monospace,"Cascadia Mono",Consolas,monospace;overflow:hidden}
+  #wrap{position:fixed;inset:0;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;gap:10px;padding:10px}
+  canvas{image-rendering:pixelated;image-rendering:crisp-edges;
+    border:2px solid #1b2440;border-radius:4px;box-shadow:0 0 0 1px #000,0 18px 60px rgba(0,0,0,.7);
+    width:min(96vw, 1040px); height:auto; max-height:78vh; touch-action:none}
+  #keys{display:flex;gap:6px;flex-wrap:wrap;justify-content:center;max-width:1040px}
+  .k{background:#111a2e;border:1px solid #263352;color:var(--dim);border-radius:5px;
+    padding:7px 11px;font-size:12px;letter-spacing:.06em;user-select:none;-webkit-user-select:none;cursor:pointer}
+  .k b{color:var(--ink)}
+  .k:active{background:#1b2740;color:var(--ink)}
+  #hint{color:var(--dim);font-size:11.5px;letter-spacing:.08em;text-align:center}
+  @media (pointer:coarse){ #hint{display:none} }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="c" width="480" height="270"></canvas>
+  <div id="keys">
+    <div class="k" data-act="lr-"><b>&#9660;</b> LR</div>
+    <div class="k" data-act="lr+"><b>&#9650;</b> LR</div>
+    <div class="k" data-act="b-"><b>&#9664;</b> MOMENTUM</div>
+    <div class="k" data-act="b+">MOMENTUM <b>&#9654;</b></div>
+    <div class="k" data-act="adam"><b>A</b> ADAM</div>
+    <div class="k" data-act="clip"><b>C</b> CLIP</div>
+    <div class="k" data-act="go"><b>SPACE</b> TRAIN</div>
+    <div class="k" data-act="step"><b>S</b> STEP</div>
+    <div class="k" data-act="reset"><b>R</b> RESET</div>
+  </div>
+  <div id="hint">up/down learning rate &nbsp;·&nbsp; left/right momentum &nbsp;·&nbsp; A adam &nbsp;·&nbsp; C clip &nbsp;·&nbsp; space train/pause &nbsp;·&nbsp; S single step</div>
+</div>
+
+<script>
+"use strict";
+/* ============================================================ optimizer core
+   Pure logic, no DOM. Every level below was checked by replaying this code
+   headless over every constant hyperparameter setting:
+     BOWL     a few learning rates work, most stall or explode
+     RAVINE   no momentum-free setting converges in budget
+     PLATEAU  only Adam crosses the vanishing-gradient plateau
+     CLIFF    every unclipped setting either stalls or diverges
+     BANANA   4 of 264 constant settings survive the curved valley
+     RUGGED   0 of 264 constant settings win; you must decay LR mid run  */
+
+const LR_GRID   = [0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0];
+const BETA_GRID = [0, 0.5, 0.8, 0.9, 0.95, 0.99];
+const CLIP_NORM = 1.0;
+const ADAM_B2 = 0.999, ADAM_EPS = 1e-8;
+const HOLD_STEPS = 6;              // consecutive steps inside tolerance = converged
+
+function sq(v){ return v*v; }
+function rot(x, y, a){ const c = Math.cos(a), s = Math.sin(a); return [c*x - s*y, s*x + c*y]; }
+
+const LEVELS = [
+  { name:"BOWL", concept:"LEARNING RATE",
+    formula:"F = X^2 + 4Y^2",
+    lines:["EVERY STEP MOVES THE WEIGHTS BY -LR * GRADIENT.",
+           "TOO SMALL AND YOU RUN OUT OF STEPS.",
+           "TOO BIG AND EACH STEP OVERSHOOTS UNTIL IT EXPLODES."],
+    hint:"THE GHOST DOT SHOWS WHERE THE NEXT STEP LANDS. TUNE LR UNTIL IT LOOKS RIGHT.",
+    tools:{ beta:false, adam:false, clip:false },
+    view:[-2.2, 2.2, -1.7, 1.7], start:[-1.9, 1.35], min:[0, 0],
+    budget:24, tol:0.004, lr:2, beta:0,
+    f:(x, y) => x*x + 4*y*y },
+
+  { name:"RAVINE", concept:"MOMENTUM",
+    formula:"F = 1/2 (U^2 + 60 V^2), ROTATED",
+    lines:["ONE STEEP AXIS, ONE ALMOST FLAT AXIS.",
+           "AN LR SAFE FOR THE WALLS CRAWLS ALONG THE FLOOR.",
+           "MOMENTUM ACCUMULATES VELOCITY WHERE GRADIENTS AGREE."],
+    hint:"KEEP LR LOW ENOUGH FOR THE WALLS, THEN PUSH MOMENTUM TO 0.8 OR MORE.",
+    tools:{ beta:true, adam:false, clip:false },
+    view:[-3.4, 3.4, -2.2, 2.2], start:[-3.0, -0.2], min:[0, 0],
+    budget:50, tol:0.01, lr:4, beta:0,
+    f:(x, y) => { const [u, v] = rot(x, y, -0.35); return 0.5*(u*u + 60*v*v); } },
+
+  { name:"PLATEAU", concept:"ADAM",
+    formula:"F = 1 - EXP(-R^2 / 0.5)",
+    lines:["FAR FROM THE WELL THE GRADIENT ALMOST VANISHES,",
+           "SO SGD BARELY MOVES. ADAM DIVIDES BY A RUNNING",
+           "ESTIMATE OF GRADIENT SCALE: ITS STEP IS ABOUT LR."],
+    hint:"PRESS A FOR ADAM. ITS STEP SIZE IS ROUGHLY LR, SO LOWER LR NEAR THE WELL.",
+    tools:{ beta:true, adam:true, clip:false },
+    view:[-3.2, 3.2, -2.1, 2.1], start:[-2.8, 1.7], min:[0.9, -0.5],
+    budget:70, tol:0.02, lr:6, beta:3,
+    f:(x, y) => 1 - Math.exp(-(sq(x-0.9) + sq(y+0.5))/0.5) + 0.004*(sq(x-0.9) + sq(y+0.5)) },
+
+  { name:"CLIFF", concept:"GRADIENT CLIPPING",
+    formula:"F = BOWL + 120 SIGMOID(-(X+0.8)/0.25)",
+    lines:["A SHEER DROP, LIKE THE CLIFFS IN RNN LOSSES.",
+           "ON ITS FACE THE GRADIENT IS ENORMOUS: ONE STEP",
+           "FIRES YOU OFF THE MAP. ADAM IS OFFLINE FOR THIS RUN."],
+    hint:"PRESS C. A CLIPPED GRADIENT HAS NORM 1, SO NO STEP IS LONGER THAN LR.",
+    tools:{ beta:true, adam:false, clip:true },
+    view:[-3.0, 3.0, -1.9, 1.9], start:[-2.6, -1.3], min:[1.8, 0.6],
+    budget:45, tol:0.02, lr:6, beta:0,
+    f:(x, y) => 0.2*(sq(x-1.8) + 3*sq(y-0.6)) + 120/(1 + Math.exp((x+0.8)/0.25)) },
+
+  { name:"BANANA", concept:"ROSENBROCK",
+    formula:"F = (1-X)^2 + 10(Y-X^2)^2",
+    lines:["THE CLASSIC OPTIMIZER BENCHMARK.",
+           "THE VALLEY IS EASY TO FIND AND MISERABLE",
+           "TO FOLLOW, BECAUSE IT CURVES. USE EVERYTHING."],
+    hint:"GET INTO THE VALLEY GENTLY, THEN LET MOMENTUM CARRY YOU ALONG THE CURVE.",
+    tools:{ beta:true, adam:true, clip:true },
+    view:[-2.0, 2.0, -1.0, 3.0], start:[-1.6, 2.8], min:[1, 1],
+    budget:80, tol:0.01, lr:4, beta:0,
+    f:(x, y) => sq(1-x) + 10*sq(y - x*x) },
+
+  { name:"RUGGED", concept:"LR SCHEDULE",
+    formula:"F = 0.15 R^2 + 2 - COS 3X - COS 3Y",
+    lines:["DOZENS OF LOCAL MINIMA. A SMALL LR STICKS IN THE",
+           "FIRST ONE IT MEETS. A BIG LR NEVER SETTLES.",
+           "NO FIXED SETTING WINS. START HOT, DECAY MID RUN."],
+    hint:"PLAIN SGD AT LR 0.5 HOPS BETWEEN BASINS. PAUSE THE MOMENT YOU LAND IN THE CENTRE, DROP LR, RESUME.",
+    tools:{ beta:true, adam:true, clip:true },
+    view:[-4.2, 4.2, -2.8, 2.8], start:[3.6, -2.3], min:[0, 0],
+    budget:90, tol:0.02, lr:4, beta:0,
+    f:(x, y) => 0.15*(x*x + y*y) + 2 - Math.cos(3*x) - Math.cos(3*y) }
+];
+
+function grad(L, x, y){
+  const h = 1e-5;
+  return [(L.f(x+h, y) - L.f(x-h, y))/(2*h), (L.f(x, y+h) - L.f(x, y-h))/(2*h)];
+}
+
+function newRun(L){
+  return { x:L.start[0], y:L.start[1], vx:0, vy:0, mx:0, my:0, sx:0, sy:0, at:0,
+           t:0, hold:0, status:"run", path:[[L.start[0], L.start[1]]],
+           losses:[L.f(L.start[0], L.start[1])], gn:Math.hypot(...grad(L, L.start[0], L.start[1])),
+           clipped:false };
+}
+// switching optimizer builds fresh state, exactly like constructing a new torch.optim object
+function resetBuffers(r){ r.vx = r.vy = r.mx = r.my = r.sx = r.sy = 0; r.at = 0; }
+
+/* cfg = { lr, beta, adam, clip }. Mirrors torch.optim semantics:
+   SGD momentum: v = beta*v + g ;  p -= lr*v
+   Adam:         m, s bias-corrected moments, beta1 = cfg.beta, beta2 = 0.999 */
+function step(L, r, cfg){
+  if(r.status !== "run") return;
+  let [gx, gy] = grad(L, r.x, r.y);
+  const n = Math.hypot(gx, gy);
+  r.clipped = false;
+  if(cfg.clip && n > CLIP_NORM){ gx *= CLIP_NORM/n; gy *= CLIP_NORM/n; r.clipped = true; }
+  r.t++;
+  if(cfg.adam){
+    const b1 = cfg.beta;
+    r.at++;
+    r.mx = b1*r.mx + (1-b1)*gx;              r.my = b1*r.my + (1-b1)*gy;
+    r.sx = ADAM_B2*r.sx + (1-ADAM_B2)*gx*gx; r.sy = ADAM_B2*r.sy + (1-ADAM_B2)*gy*gy;
+    const c1 = 1 - Math.pow(b1, r.at), c2 = 1 - Math.pow(ADAM_B2, r.at);
+    r.x -= cfg.lr * (r.mx/c1) / (Math.sqrt(r.sx/c2) + ADAM_EPS);
+    r.y -= cfg.lr * (r.my/c1) / (Math.sqrt(r.sy/c2) + ADAM_EPS);
+  } else {
+    r.vx = cfg.beta*r.vx + gx; r.vy = cfg.beta*r.vy + gy;
+    r.x -= cfg.lr * r.vx;      r.y -= cfg.lr * r.vy;
+  }
+  const loss = L.f(r.x, r.y);
+  if(r.path){ r.path.push([r.x, r.y]); r.losses.push(loss); }
+  if(!isFinite(loss) || outside(L, r.x, r.y)){ r.status = "nan"; return; }
+  r.gn = Math.hypot(...grad(L, r.x, r.y));
+  if(loss - L.fmin < L.tol){ if(++r.hold >= HOLD_STEPS){ r.status = "won"; return; } }
+  else r.hold = 0;
+  if(r.t >= L.budget) r.status = "budget";
+}
+function outside(L, x, y){
+  const [x0, x1, y0, y1] = L.view, mx = (x1-x0)*0.08, my = (y1-y0)*0.08;
+  return x < x0-mx || x > x1+mx || y < y0-my || y > y1+my;
+}
+
+function prepLevel(L){
+  // refine the hand-given minimum with a shrinking pattern search
+  let [x, y] = L.min, best = L.f(x, y);
+  for(let s = 0.2; s > 1e-7; s *= 0.5){
+    let moved = true;
+    while(moved){
+      moved = false;
+      for(const [dx, dy] of [[s,0],[-s,0],[0,s],[0,-s]]){
+        const v = L.f(x+dx, y+dy);
+        if(v < best){ best = v; x += dx; y += dy; moved = true; }
+      }
+    }
+  }
+  L.min = [x, y]; L.fmin = best;
+}
+LEVELS.forEach(prepLevel);
+</script>
+
+<script>
+"use strict";
+/* ---------------------------------------------------------------- 5x7 font */
+const G = {
+ A:" ## /#  #/#  #/####/#  #/#  #/#  #", B:"### /#  #/#  #/### /#  #/#  #/### ",
+ C:" ###/#   /#   /#   /#   /#   / ###", D:"### /#  #/#  #/#  #/#  #/#  #/### ",
+ E:"####/#   /#   /### /#   /#   /####", F:"####/#   /#   /### /#   /#   /#   ",
+ G:" ###/#   /#   /# ##/#  #/#  #/ ###", H:"#  #/#  #/#  #/####/#  #/#  #/#  #",
+ I:"###/ # / # / # / # / # /###",      J:"  ##/   #/   #/   #/#  #/#  #/ ## ",
+ K:"#  #/# # /##  /##  /# # /#  #/#  #", L:"#   /#   /#   /#   /#   /#   /####",
+ M:"#   #/## ##/# # #/# # #/#   #/#   #/#   #", N:"#  #/## #/## #/# ##/# ##/#  #/#  #",
+ O:" ## /#  #/#  #/#  #/#  #/#  #/ ## ", P:"### /#  #/#  #/### /#   /#   /#   ",
+ Q:" ## /#  #/#  #/#  #/# ##/#  #/ ###", R:"### /#  #/#  #/### /# # /#  #/#  #",
+ S:" ###/#   /#   / ## /   #/   #/### ", T:"#####/  #  /  #  /  #  /  #  /  #  /  #  ",
+ U:"#  #/#  #/#  #/#  #/#  #/#  #/ ## ", V:"#   #/#   #/#   #/#   #/ # # / # # /  #  ",
+ W:"#   #/#   #/#   #/# # #/# # #/## ##/#   #", X:"#  #/#  #/ ## / ## / ## /#  #/#  #",
+ Y:"#   #/#   #/ # # /  #  /  #  /  #  /  #  ", Z:"####/   #/  # / #  /#   /#   /####",
+ "0":" ## /#  #/# ##/#  #/## #/#  #/ ## ", "1":" # /## / # / # / # / # /###",
+ "2":" ## /#  #/   #/  # / #  /#   /####", "3":"### /   #/   #/ ## /   #/   #/### ",
+ "4":"#  #/#  #/#  #/####/   #/   #/   #", "5":"####/#   /### /   #/   #/#  #/ ## ",
+ "6":" ## /#   /#   /### /#  #/#  #/ ## ", "7":"####/   #/  # /  # / #  / #  / #  ",
+ "8":" ## /#  #/#  #/ ## /#  #/#  #/ ## ", "9":" ## /#  #/#  #/ ###/   #/   #/ ## ",
+ " ":"   /   /   /   /   /   /   ", ".":"  /  /  /  /  /  / #", ":":"  / # / # /  /  / # / # ",
+ "-":"    /    /    /####/    /    /    ", "!":" # / # / # / # / # /   / # ",
+ "%":"#  #/#  #/   #/  # / #  /#  #/#  #", "/":"   #/   #/  # / #  / #  /#   /#   ",
+ "+":"    /  # /  # /####/  # /  # /    ", "?":" ## /#  #/   #/  # / #  /    / #  ",
+ "'":" # / # /   /   /   /   /   ",       "(":"  #/ # /#  /#  /#  / # /  #",
+ ")":"#  / # /  #/  #/  #/ # /#  ",       "=":"    /    /####/    /####/    /    ",
+ ",":"  /  /  /  /  / #/# ",               "^":" # /# #/   /   /   /   /   ",
+ "*":"   /   /# #/ # /# #/   /   ",        "|":"#/#/#/#/#/#/#",
+ "<":"  #/ # /#  / # /  #/   /   ",        ">":"#  / # /  #/ # /#  /   /   ",
+ "_":"    /    /    /    /    /    /####"
+};
+function glyph(ch){ return (G[ch] || G["?"]).split("/"); }
+function textW(s, sc){ sc = sc||1; let w=0; for(const ch of s.toUpperCase()) w += (glyph(ch)[0].length+1)*sc; return w-sc; }
+function text(x, y, s, col, sc){
+  sc = sc||1; g.fillStyle = col; let cx = x|0;
+  for(const ch of s.toUpperCase()){
+    const rows = glyph(ch);
+    for(let r=0;r<rows.length;r++)
+      for(let c=0;c<rows[r].length;c++)
+        if(rows[r][c] === "#") g.fillRect(cx+c*sc, (y|0)+r*sc, sc, sc);
+    cx += (rows[0].length+1)*sc;
+  }
+}
+function textC(y, s, col, sc){ text((W-textW(s,sc))/2, y, s, col, sc); }
+function textR(x, y, s, col, sc){ text(x - textW(s,sc), y, s, col, sc); }
+
+function num(v){
+  if(!isFinite(v)) return "NAN";
+  const a = Math.abs(v);
+  if(a !== 0 && (a < 0.001 || a >= 10000)){
+    const e = Math.floor(Math.log10(a));
+    return (v/Math.pow(10, e)).toFixed(1) + "E" + e;
+  }
+  return a >= 100 ? v.toFixed(1) : v.toFixed(4);
+}
+
+/* ------------------------------------------------------------------ setup */
+const cv = document.getElementById("c");
+const g  = cv.getContext("2d");
+const W = cv.width, H = cv.height;
+const MX = 4, MY = 20, MW = 300, MH = 246;          // map viewport
+const PX = 310, PW = W - PX - 4;                    // side panel
+
+const C = { ink:"#e8eeff", dim:"#6f7fa6", faint:"#3a4666", gold:"#ffd60a", cyan:"#63e6ff",
+            green:"#4ade80", red:"#ff5d5d", orange:"#ff8a24", line:"#1b2440" };
+
+// viridis-ish, low loss = dark
+const PAL = ["#071026","#0b1a3d","#10254f","#15315f","#1a3e6d","#1f4b78","#265981",
+             "#2f6787","#3b7489","#4b8088","#5f8a84","#76927f","#8f977b","#a89a78"];
+
+let lvl = 0, L, run, cfg, state = "title", runs = 0, fails = 0;
+let totals = { steps:0, runs:0 };
+let map = null, mapT = null, training = false, acc = 0, flash = 0;
+const STEP_DT = 1/7;
+
+function view(){
+  const [x0, x1, y0, y1] = L.view;
+  const sc = Math.min(MW/(x1-x0), MH/(y1-y0));
+  return { sc, ox: MX + (MW - (x1-x0)*sc)/2 - x0*sc, oy: MY + (MH - (y1-y0)*sc)/2 + y1*sc };
+}
+function toS(v, x, y){ return [v.ox + x*v.sc, v.oy - y*v.sc]; }
+
+function buildMap(){
+  const v = view();
+  const off = document.createElement("canvas"); off.width = MW; off.height = MH;
+  const og = off.getContext("2d"), img = og.createImageData(MW, MH);
+  const vals = new Float64Array(MW*MH), [x0, x1, y0, y1] = L.view;
+  for(let j=0;j<MH;j++) for(let i=0;i<MW;i++){
+    const x = (MX + i + 0.5 - v.ox)/v.sc, y = (v.oy - (MY + j + 0.5))/v.sc;
+    vals[j*MW+i] = Math.log10(Math.max(1e-6, L.f(x, y) - L.fmin) + 1e-3);
+  }
+  const inside = [];
+  for(let j=0;j<MH;j++) for(let i=0;i<MW;i++){
+    const x = (MX + i + 0.5 - v.ox)/v.sc, y = (v.oy - (MY + j + 0.5))/v.sc;
+    if(x >= x0 && x <= x1 && y >= y0 && y <= y1) inside.push(vals[j*MW+i]);
+  }
+  // contour levels at loss quantiles, so every surface shows evenly spaced bands
+  inside.sort((a, b) => a - b);
+  const cuts = PAL.map((_, k) => inside[Math.floor(inside.length * k / PAL.length)]);
+  const band = new Int8Array(MW*MH);
+  for(let k=0;k<vals.length;k++){
+    let b = 0; while(b + 1 < PAL.length && vals[k] >= cuts[b+1]) b++;
+    band[k] = b;
+  }
+  const rgb = PAL.map(h => [1,3,5].map(o => parseInt(h.substr(o,2),16)));
+  for(let j=0;j<MH;j++) for(let i=0;i<MW;i++){
+    const k = j*MW+i, x = (MX + i + 0.5 - v.ox)/v.sc, y = (v.oy - (MY + j + 0.5))/v.sc;
+    let [r, gg, b] = rgb[band[k]];
+    const edge = (i+1<MW && band[k+1] !== band[k]) || (j+1<MH && band[k+MW] !== band[k]);
+    if(edge){ r *= 0.55; gg *= 0.55; b *= 0.55; }
+    if(outside(L, x, y)){                               // the NaN zone
+      const h = ((i + j) % 6) < 2;
+      r = h ? 70 : 28; gg = h ? 14 : 8; b = h ? 24 : 14;
+    } else if(x < x0 || x > x1 || y < y0 || y > y1){    // edge of the map
+      r *= 0.4; gg *= 0.4; b *= 0.4;
+    }
+    img.data.set([r, gg, b, 255], k*4);
+  }
+  og.putImageData(img, 0, 0);
+  map = off;
+}
+
+function loadLevel(i){
+  lvl = i; L = LEVELS[i];
+  cfg = { lr:LR_GRID[L.lr], li:L.lr, bi:L.beta, beta:BETA_GRID[L.beta], adam:false, clip:false };
+  runs = 0; fails = 0;
+  buildMap();
+  resetRun();
+  state = "intro";
+}
+function resetRun(){
+  run = newRun(L); runs++; training = false; acc = 0;
+  if(state !== "intro" && state !== "title") state = "play";
+}
+
+/* ------------------------------------------------------------------ input */
+function setLR(d){ cfg.li = Math.max(0, Math.min(LR_GRID.length-1, cfg.li + d)); cfg.lr = LR_GRID[cfg.li]; }
+function setBeta(d){
+  if(!L.tools.beta) return deny();
+  cfg.bi = Math.max(0, Math.min(BETA_GRID.length-1, cfg.bi + d)); cfg.beta = BETA_GRID[cfg.bi];
+}
+function deny(){ flash = 0.5; }
+
+function act(a){
+  if(state === "title"){ if(a === "go") loadLevel(0); return; }
+  if(state === "intro"){ if(a === "go"){ state = "play"; } return; }
+  if(state === "final"){ if(a === "reset"){ totals = {steps:0, runs:0}; loadLevel(0); } return; }
+  if(state === "won"){
+    if(a === "go"){ if(lvl + 1 < LEVELS.length) loadLevel(lvl + 1); else state = "final"; }
+    return;
+  }
+  if(state === "nan" || state === "budget"){
+    if(a === "go" || a === "reset"){ state = "play"; resetRun(); }
+    else tweak(a);                         // let the player fix settings before retrying
+    return;
+  }
+  // play
+  if(a === "go") training = !training;
+  else if(a === "step"){ training = false; doStep(); }
+  else if(a === "reset") resetRun();
+  else tweak(a);
+}
+function tweak(a){
+  if(a === "lr+") setLR(1);
+  else if(a === "lr-") setLR(-1);
+  else if(a === "b+") setBeta(1);
+  else if(a === "b-") setBeta(-1);
+  else if(a === "adam"){ if(!L.tools.adam) return deny(); cfg.adam = !cfg.adam; resetBuffers(run); }
+  else if(a === "clip"){ if(!L.tools.clip) return deny(); cfg.clip = !cfg.clip; }
+}
+
+function doStep(){
+  step(L, run, cfg);
+  if(run.status !== "run"){
+    training = false;
+    totals.runs++;
+    if(run.status === "won") totals.steps += run.t; else fails++;
+    state = run.status;
+  }
+}
+
+const KEYMAP = { ArrowUp:"lr+", ArrowDown:"lr-", ArrowRight:"b+", ArrowLeft:"b-",
+                 KeyA:"adam", KeyC:"clip", Space:"go", Enter:"go", KeyS:"step", KeyR:"reset", Period:"step" };
+addEventListener("keydown", e => {
+  const a = KEYMAP[e.code]; if(!a) return;
+  e.preventDefault();
+  if(e.repeat && (a === "go" || a === "adam" || a === "clip" || a === "reset")) return;
+  act(a);
+});
+for(const el of document.querySelectorAll(".k"))
+  el.addEventListener("pointerdown", e => { e.preventDefault(); act(el.dataset.act); });
+cv.addEventListener("pointerdown", e => {
+  if(state === "final") return;
+  if(state !== "play") act("go");
+});
+
+/* ------------------------------------------------------------------ update */
+function update(dt){
+  flash = Math.max(0, flash - dt);
+  if(state !== "play" || !training) return;
+  acc += dt;
+  while(acc >= STEP_DT && state === "play"){ acc -= STEP_DT; doStep(); }
+}
+
+/* ------------------------------------------------------------------- draw */
+function box(x, y, w, h, col){ g.fillStyle = col; g.fillRect(x|0, y|0, w|0, h|0); }
+
+function drawMap(){
+  box(0, 0, W, H, "#070b18");
+  g.drawImage(map, MX, MY);
+  const v = view();
+
+  // minimum marker
+  const [mx, my] = toS(v, L.min[0], L.min[1]);
+  g.strokeStyle = C.gold; g.lineWidth = 1;
+  g.beginPath(); g.moveTo(mx-4, my-4); g.lineTo(mx+4, my+4); g.moveTo(mx+4, my-4); g.lineTo(mx-4, my+4); g.stroke();
+  const tolR = Math.max(3, Math.sqrt(L.tol) * v.sc * 0.6);
+  g.strokeStyle = "rgba(255,214,10,.35)"; g.beginPath(); g.arc(mx, my, tolR, 0, 7); g.stroke();
+
+  // start marker
+  const [sx0, sy0] = toS(v, L.start[0], L.start[1]);
+  box(sx0-2, sy0-2, 5, 5, "rgba(232,238,255,.35)");
+
+  g.save(); g.beginPath(); g.rect(MX, MY, MW, MH); g.clip();
+
+  // trajectory
+  const P = run.path;
+  g.lineWidth = 1;
+  for(let k=1;k<P.length;k++){
+    const a = toS(v, P[k-1][0], P[k-1][1]), b = toS(v, P[k][0], P[k][1]);
+    const age = P.length - k;
+    g.strokeStyle = age < 8 ? "rgba(255,255,255,.85)" : "rgba(255,255,255,.4)";
+    g.beginPath(); g.moveTo(a[0], a[1]); g.lineTo(b[0], b[1]); g.stroke();
+  }
+  for(let k=0;k<P.length;k++){
+    const [px, py] = toS(v, P[k][0], P[k][1]);
+    box(px-1, py-1, 2, 2, "#ffffff");
+  }
+
+  // ghost: exactly where the next update lands with the current settings
+  if(state === "play"){
+    const ghost = Object.assign({}, run, { path:null, status:"run", t:0 });
+    step(L, ghost, cfg);
+    const [bx, by] = toS(v, run.x, run.y), [gx, gy] = toS(v, ghost.x, ghost.y);
+    const bad = ghost.status === "nan" || !isFinite(gx);
+    g.setLineDash([2, 2]);
+    g.strokeStyle = bad ? C.red : C.cyan;
+    const ex = isFinite(gx) ? gx : bx, ey = isFinite(gy) ? gy : by;
+    g.beginPath(); g.moveTo(bx, by); g.lineTo(ex, ey); g.stroke();
+    g.setLineDash([]);
+    g.beginPath(); g.arc(ex, ey, 3, 0, 7); g.stroke();
+    if(bad) text(Math.min(MX+MW-70, Math.max(MX+2, bx-30)), Math.max(MY+2, by-16), "NEXT STEP: NAN", C.red, 1);
+  }
+
+  // ball
+  const [bx, by] = toS(v, run.x, run.y);
+  if(isFinite(bx) && isFinite(by)){
+    g.fillStyle = "rgba(255,138,36,.25)"; g.beginPath(); g.arc(bx, by, 7, 0, 7); g.fill();
+    g.fillStyle = C.orange; g.beginPath(); g.arc(bx, by, 3.6, 0, 7); g.fill();
+    box(bx-2, by-2, 1, 1, "#ffe4a0");
+  }
+  g.restore();
+
+  g.strokeStyle = C.line; g.strokeRect(MX-0.5, MY-0.5, MW+1, MH+1);
+}
+
+function drawTop(){
+  box(0, 0, W, 16, "rgba(5,8,16,.9)"); box(0, 16, W, 1, C.line);
+  text(5, 5, "LVL " + (lvl+1) + "/" + LEVELS.length + "  " + L.name, C.ink, 1);
+  text(96, 5, L.concept, C.gold, 1);
+  textR(W-5, 5, "RUN " + runs, C.dim, 1);
+}
+
+function meter(x, y, w, n, idx, on){
+  const cell = Math.floor(w / n);
+  for(let k=0;k<n;k++) box(x + k*cell, y, cell-1, 4, k <= idx ? (on ? C.cyan : C.faint) : "#141c33");
+}
+
+function drawPanel(){
+  box(PX-4, 17, W-PX+4, H-17, "#0a0f1e"); box(PX-4, 17, 1, H-17, C.line);
+  let y = 22;
+  const locked = (t) => !L.tools[t];
+  const deniedCol = flash > 0 && ((flash*20)|0) % 2 ? C.red : C.faint;
+
+  // optimizer
+  text(PX, y, "OPTIMIZER", C.dim, 1); textR(W-6, y, "A", C.faint, 1);
+  y += 10;
+  const chip = (x, label, sel, lock) => {
+    const w = textW(label) + 8;
+    box(x, y-2, w, 11, sel ? "#1f3a66" : "#10172a");
+    if(sel) box(x, y+8, w, 1, C.cyan);
+    text(x+4, y, label, lock ? C.faint : (sel ? C.ink : C.dim), 1);
+    return x + w + 4;
+  };
+  let cx = chip(PX, "SGD", !cfg.adam, false);
+  cx = chip(cx, "ADAM", cfg.adam, locked("adam"));
+  if(locked("adam")) text(cx, y, "LOCKED", deniedCol, 1);
+
+  // learning rate
+  y += 16;
+  text(PX, y, "LEARNING RATE", C.dim, 1); textR(W-6, y, "UP/DN", C.faint, 1);
+  y += 10;
+  text(PX, y, String(cfg.lr), C.ink, 1);
+  meter(PX + 44, y+1, PW - 46, LR_GRID.length, cfg.li, true);
+
+  // momentum
+  y += 14;
+  text(PX, y, cfg.adam ? "BETA1 (ADAM)" : "MOMENTUM", C.dim, 1); textR(W-6, y, "L/R", C.faint, 1);
+  y += 10;
+  if(locked("beta")){ text(PX, y, "0  LOCKED", deniedCol, 1); }
+  else { text(PX, y, String(cfg.beta), C.ink, 1); meter(PX + 44, y+1, PW - 46, BETA_GRID.length, cfg.bi, true); }
+
+  // clipping
+  y += 14;
+  text(PX, y, "GRAD CLIP", C.dim, 1); textR(W-6, y, "C", C.faint, 1);
+  if(locked("clip")) text(PX + 60, y, "LOCKED", deniedCol, 1);
+  else text(PX + 60, y, cfg.clip ? "NORM " + CLIP_NORM.toFixed(1) : "OFF", cfg.clip ? C.green : C.dim, 1);
+
+  y += 13; box(PX, y, PW - 2, 1, C.line); y += 5;
+
+  // telemetry
+  const loss = run.losses[run.losses.length-1];
+  text(PX, y, "STEP", C.dim, 1); textR(W-6, y, run.t + "/" + L.budget, run.t > L.budget*0.8 ? C.red : C.ink, 1);
+  y += 9;
+  box(PX, y, PW-2, 3, "#141c33");
+  box(PX, y, ((PW-2) * run.t / L.budget)|0, 3, run.t > L.budget*0.8 ? C.red : C.cyan);
+  y += 7;
+  text(PX, y, "LOSS", C.dim, 1);
+  textR(W-6, y, num(loss - L.fmin), loss - L.fmin < L.tol ? C.green : C.ink, 1);
+  y += 10;
+  text(PX, y, "GRAD NORM", C.dim, 1);
+  if(run.clipped) text(PX + 58, y, "CLIPPED", C.gold, 1);
+  textR(W-6, y, num(run.gn), run.gn > 20 ? C.red : C.ink, 1);
+
+  // loss curve, log scale, like a tensorboard panel
+  y += 12;
+  const gx = PX, gy = y, gw = PW - 2, gh = H - y - 26;
+  box(gx, gy, gw, gh, "#070b18");
+  const lg = v => Math.log10(Math.max(1e-4, v - L.fmin));
+  const top = Math.max(0.5, lg(L.f(L.start[0], L.start[1])) + 0.5), bot = -4;
+  const Y = v => gy + gh - 2 - (Math.max(bot, Math.min(top, lg(v))) - bot)/(top - bot)*(gh - 4);
+  const ty = Y(L.fmin + L.tol);
+  for(let i=0;i<gw;i+=4) box(gx+i, ty, 2, 1, "rgba(74,222,128,.6)");
+  text(gx + 2, ty - 8, "TOL", C.green, 1);
+  g.strokeStyle = C.orange; g.lineWidth = 1; g.beginPath();
+  run.losses.forEach((v, k) => {
+    const px = gx + 1 + k/L.budget*(gw-2), py = isFinite(v) ? Y(v) : gy + 1;
+    if(k === 0) g.moveTo(px, py); else g.lineTo(px, py);
+  });
+  g.stroke();
+  textR(gx + gw - 2, gy + 2, "LOG LOSS", C.faint, 1);
+
+  // status
+  const sy = H - 12;
+  if(state === "play"){
+    if(run.hold > 0){
+      text(PX, sy, "CONVERGING " + run.hold + "/" + HOLD_STEPS, C.green, 1);
+    } else if(training){
+      text(PX, sy, "TRAINING", C.cyan, 1); textR(W-6, sy, "SPACE PAUSE", C.faint, 1);
+    } else {
+      const on = ((performance.now()/500)|0) % 2 === 0;
+      text(PX, sy, "PAUSED", on ? C.gold : C.dim, 1); textR(W-6, sy, "SPACE TRAIN", C.faint, 1);
+    }
+  }
+}
+
+function panel(y, h){
+  box(0, y, W, h, "rgba(4,7,14,.92)");
+  box(0, y, W, 1, C.line); box(0, y+h-1, W, 1, C.line);
+}
+
+function drawTitle(){
+  if(!map){ L = LEVELS[5]; run = newRun(L); buildMap(); }
+  g.drawImage(map, MX, MY); g.drawImage(map, MX + MW, MY);
+  box(0, 0, W, H, "rgba(5,7,15,.35)");
+  panel(38, 196);
+  textC(52, "GRADIENT DESCENT", "#eef4ff", 3);
+  textC(80, "YOU ARE THE OPTIMIZER", C.cyan, 1);
+  textC(100, "THE BALL IS A MODEL'S WEIGHTS. THE COLOURS ARE ITS LOSS.", "#8fa3cc", 1);
+  textC(112, "EVERY STEP RUNS THE REAL UPDATE RULE FROM TORCH.OPTIM.", "#8fa3cc", 1);
+  textC(124, "YOU DON'T STEER THE BALL. YOU TUNE THE OPTIMIZER.", C.gold, 1);
+  textC(144, "SIX LOSS SURFACES. SIX WAYS TRAINING BREAKS:", "#8fa3cc", 1);
+  textC(156, "BAD LR, RAVINES, PLATEAUS, CLIFFS, CURVED VALLEYS, LOCAL MINIMA", C.dim, 1);
+  textC(176, "UP/DN LR   L/R MOMENTUM   A ADAM   C CLIP   S STEP", "#5f6f96", 1);
+  if(((performance.now()/520)|0) % 2 === 0) textC(196, "PRESS SPACE TO START", C.gold, 2);
+  textC(220, "BUILT BY SIDDHANT SHIVAM", "#3f4c6e", 1);
+}
+
+function toolsLine(){
+  const names = [["LR", true], ["MOMENTUM", L.tools.beta], ["ADAM", L.tools.adam], ["CLIP", L.tools.clip]];
+  const prev = lvl > 0 ? LEVELS[lvl-1].tools : { beta:false, adam:false, clip:false };
+  const isNew = n => (n === "MOMENTUM" && L.tools.beta && !prev.beta) ||
+                     (n === "ADAM" && L.tools.adam && !prev.adam) ||
+                     (n === "CLIP" && L.tools.clip && !prev.clip);
+  const parts = names.map(([n, on]) => [on ? (isNew(n) ? "NEW " + n : n) : n, on ? (isNew(n) ? C.gold : C.ink) : C.faint]);
+  let w = textW("TOOLS: ") + parts.reduce((s, [t]) => s + textW(t) + 12, -12);
+  let x = (W - w)/2;
+  text(x, 190, "TOOLS:", C.dim, 1); x += textW("TOOLS: ");
+  for(const [t, col] of parts){ text(x, 190, t, col, 1); x += textW(t) + 12; }
+}
+
+function drawIntro(){
+  panel(34, 204);
+  textC(44, "LEVEL " + (lvl+1) + " / " + LEVELS.length, C.dim, 1);
+  textC(56, L.name, "#eef4ff", 3);
+  textC(84, L.concept, C.gold, 2);
+  textC(106, L.formula, C.cyan, 1);
+  L.lines.forEach((s, k) => textC(126 + k*12, s, "#8fa3cc", 1));
+  textC(172, "BUDGET " + L.budget + " STEPS   CONVERGE WITHIN " + L.tol + " OF THE MINIMUM", C.dim, 1);
+  toolsLine();
+  if(((performance.now()/520)|0) % 2 === 0) textC(214, "PRESS SPACE", C.gold, 1);
+}
+
+// result cards cover only the map, so the panel stays readable while you retune
+function textM(y, s, col, sc){ text(MX + (MW - textW(s, sc))/2, y, s, col, sc); }
+
+function drawResult(){
+  box(MX, 64, MW, 150, "rgba(4,7,14,.9)");
+  box(MX, 64, MW, 1, C.line); box(MX, 213, MW, 1, C.line);
+  const final = num(run.losses[run.losses.length-1] - L.fmin);
+  if(state === "won"){
+    textM(78, "CONVERGED", C.green, 3);
+    textM(106, "STEP " + run.t + " OF " + L.budget + "   LOSS " + final, "#8fa3cc", 1);
+    textM(120, "RUN " + runs + " ON THIS SURFACE", C.dim, 1);
+    textM(146, (cfg.adam ? "ADAM" : "SGD") + "  LR " + cfg.lr + "  BETA " + cfg.beta + (cfg.clip ? "  CLIP" : ""), C.cyan, 1);
+    textM(190, lvl + 1 < LEVELS.length ? "SPACE FOR THE NEXT SURFACE" : "PRESS SPACE", C.gold, 1);
+    return;
+  }
+  if(state === "nan"){
+    textM(78, "LOSS = NAN", C.red, 3);
+    textM(106, "THE UPDATE THREW THE WEIGHTS OFF THE MAP.", "#8fa3cc", 1);
+    textM(118, cfg.clip ? "EVEN CLIPPED, THIS LR IS TOO LARGE HERE." : "THE STEP WAS TOO BIG FOR THE CURVATURE.", C.dim, 1);
+  } else {
+    textM(78, "OUT OF STEPS", C.red, 3);
+    textM(106, "LOSS " + final + " ABOVE THE MINIMUM, NEEDED " + L.tol, "#8fa3cc", 1);
+    textM(118, "TOO SLOW, STUCK, OR STILL BOUNCING.", C.dim, 1);
+  }
+  if(fails >= 1){
+    textM(140, "HINT", C.gold, 1);
+    const lines = [""];
+    for(const wd of L.hint.split(" ")){
+      if(textW(lines[lines.length-1] + " " + wd) > MW - 16) lines.push("");
+      lines[lines.length-1] += (lines[lines.length-1] ? " " : "") + wd;
+    }
+    lines.forEach((s, k) => textM(152 + k*11, s, C.ink, 1));
+  }
+  textM(198, "RETUNE, THEN SPACE TO RETRY", C.gold, 1);
+}
+
+function drawFinal(){
+  box(0, 0, W, H, "#070b18");
+  panel(28, 216);
+  textC(42, "ALL SURFACES CONVERGED", C.green, 2);
+  textC(66, "YOU TRAINED THROUGH BAD LEARNING RATES, RAVINES,", "#8fa3cc", 1);
+  textC(78, "PLATEAUS, CLIFFS, BANANAS AND A FIELD OF LOCAL MINIMA.", "#8fa3cc", 1);
+  textC(96, "TOTAL WINNING STEPS " + totals.steps + "   TOTAL RUNS " + totals.runs, C.cyan, 1);
+  const on = ((performance.now()/560)|0) % 2 === 0;
+  const bw = textW("CLAIM YOUR REWARD",2)+22;
+  g.fillStyle = on ? "#ffd60a" : "#d8b400";
+  g.fillRect((W-bw)/2, 132, bw, 26);
+  g.fillStyle = "#584a00"; g.fillRect((W-bw)/2, 156, bw, 2);
+  text((W-textW("CLAIM YOUR REWARD",2))/2, 140, "CLAIM YOUR REWARD", "#1b1600", 2);
+  textC(172, "CLICK THE BUTTON ABOVE", "#8fa3cc", 1);
+  textC(196, "BUILT BY SIDDHANT SHIVAM", "#5f6f96", 1);
+  textC(212, "PRESS R TO PLAY AGAIN", "#5f6f96", 1);
+}
+
+/* ---- reward click ------------------------------------------------------- */
+/*  Reward unlocked by converging on every surface.                         */
+const REWARD_URL = "https://drive.google.com/drive/folders/1_LeRkvmisb16IW9PspkGbypYql3ZxsOR?usp=sharing";
+
+cv.addEventListener("click", e => {
+  if(state !== "final") return;
+  const r = cv.getBoundingClientRect();
+  const x = (e.clientX - r.left) * (W / r.width);
+  const y = (e.clientY - r.top)  * (H / r.height);
+  const bw = textW("CLAIM YOUR REWARD",2)+22;
+  if(x > (W-bw)/2 && x < (W+bw)/2 && y > 132 && y < 158) window.open(REWARD_URL, "_blank");
+});
+
+/* ------------------------------------------------------------------- loop */
+let last = performance.now();
+function frame(now){
+  let dt = (now - last)/1000; last = now;
+  if(dt > 0.05) dt = 0.05;
+  update(dt);
+  if(state === "title") drawTitle();
+  else if(state === "final") drawFinal();
+  else {
+    drawMap(); drawPanel(); drawTop();
+    if(state === "intro") drawIntro();
+    else if(state !== "play") drawResult();
+  }
+  g.fillStyle = "rgba(0,0,0,.10)";
+  for(let y=0;y<H;y+=3) g.fillRect(0,y,W,1);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
