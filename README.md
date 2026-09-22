@@ -151,6 +151,6 @@ PS- Lots of research stuff too...
 
 <br>
 
-*"the model is not the product. the loop around it is."*
+*"Go Ahead! Stand your ground 🔥🔥🔥"*
 
 </div>
